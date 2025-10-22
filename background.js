@@ -48,6 +48,111 @@ const urlUtils = {
     return null;
   }
 };
+const storageAPI = {
+  get: (keys) => new Promise((resolve, reject) => {
+    chrome.storage.sync.get(keys, (items) => {
+      if (chrome.runtime.lastError) {
+        reject(chrome.runtime.lastError);
+      } else {
+        resolve(items);
+      }
+    });
+  }),
+  set: (items) => new Promise((resolve, reject) => {
+    chrome.storage.sync.set(items, () => {
+      if (chrome.runtime.lastError) {
+        reject(chrome.runtime.lastError);
+      } else {
+        resolve();
+      }
+    });
+  })
+};
+const sanitizeWhitelist = (entries = []) => {
+  if (!Array.isArray(entries)) return [];
+  const seen = new Set();
+  return entries
+    .map((entry) => typeof entry === "string" ? entry.trim() : "")
+    .filter((entry) => {
+      if (entry.length === 0 || seen.has(entry)) return false;
+      seen.add(entry);
+      return true;
+    });
+};
+const normalizeForComparison = (value) => {
+  if (typeof value !== "string") return "";
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/^www\./, "")
+    .replace(/\/$/, "");
+};
+const splitHostAndPath = (value) => {
+  const [host = "", ...pathParts] = value.split("/");
+  const path = pathParts.length ? `/${pathParts.join("/")}` : "";
+  return { host, path };
+};
+const settingsManager = {
+  whitelist: [],
+  scope: "global",
+  async load() {
+    try {
+      const stored = await storageAPI.get({ whitelist: [], scope: "global" });
+      this.whitelist = sanitizeWhitelist(stored.whitelist);
+      this.scope = stored.scope === "window" ? "window" : "global";
+    } catch (error) {
+      console.error("Failed to load whitelist settings:", error);
+      this.whitelist = [];
+      this.scope = "global";
+    }
+  },
+  isWhitelisted(url) {
+    if (!url || !urlUtils.isValid(url) || this.whitelist.length === 0) return false;
+    const normalizedUrl = normalizeForComparison(url);
+    const urlParts = splitHostAndPath(normalizedUrl);
+    return this.whitelist.some((entry) => {
+      const normalizedEntry = normalizeForComparison(entry);
+      if (!normalizedEntry.length) return false;
+      const entryParts = splitHostAndPath(normalizedEntry);
+      if (!entryParts.host) return false;
+
+      const hostMatches = urlParts.host === entryParts.host ||
+        urlParts.host.endsWith(`.${entryParts.host}`);
+      if (!hostMatches) return false;
+
+      if (!entryParts.path) return true;
+      return urlParts.path.startsWith(entryParts.path);
+    });
+  },
+  getWindowId(tab) {
+    if (!tab) return null;
+    if (typeof tab.windowId === "number") return tab.windowId;
+    return null;
+  },
+  isInScope(tab, referenceTab) {
+    if (this.scope !== "window") return true;
+    const referenceWindowId = this.getWindowId(referenceTab);
+    const tabWindowId = this.getWindowId(tab);
+    if (referenceWindowId === null || tabWindowId === null) {
+      return referenceWindowId === tabWindowId;
+    }
+    return tabWindowId === referenceWindowId;
+  },
+  handleStorageChange(changes) {
+    if (changes.whitelist) {
+      this.whitelist = sanitizeWhitelist(changes.whitelist.newValue || []);
+    }
+    if (changes.scope) {
+      this.scope = changes.scope.newValue === "window" ? "window" : "global";
+    }
+  }
+};
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName === "sync") {
+    settingsManager.handleStorageChange(changes);
+  }
+});
 class TabsInfo {
   constructor() {
     this.tabs = new Map();
@@ -125,21 +230,30 @@ const duplicateHandler = {
     }
   },
   async findAndCloseDuplicates(targetTab) {
-    if (tabsInfo.isIgnored(targetTab.id) || urlUtils.isBlank(targetTab.url)) return;
+    if (tabsInfo.isIgnored(targetTab.id) ||
+        urlUtils.isBlank(targetTab.url) ||
+        settingsManager.isWhitelisted(targetTab.url)) return;
     
     const pattern = urlUtils.toPattern(targetTab.url);
     if (!pattern) return;
-    const tabs = await safeTabOperation(chromeAPI.getTabs, { 
-      url: pattern, 
-      status: "complete" 
-    });
+    const queryOptions = {
+      url: pattern,
+      status: "complete"
+    };
+    if (settingsManager.scope === "window" && typeof targetTab.windowId === "number") {
+      queryOptions.windowId = targetTab.windowId;
+    }
+    const tabs = await safeTabOperation(chromeAPI.getTabs, queryOptions);
     
     if (!tabs || tabs.length < 2) return;
     
     const normalizedUrl = urlUtils.normalize(targetTab.url);
     
     for (const tab of tabs) {
-      if (tab.id === targetTab.id || tabsInfo.isIgnored(tab.id)) continue;
+      if (tab.id === targetTab.id ||
+          tabsInfo.isIgnored(tab.id) ||
+          !settingsManager.isInScope(tab, targetTab) ||
+          settingsManager.isWhitelisted(tab.url)) continue;
       
       if (urlUtils.normalize(tab.url) === normalizedUrl) {
         const tabToKeep = duplicateHandler.shouldKeepTab(targetTab, tab);
@@ -155,7 +269,9 @@ const duplicateHandler = {
       const tabs = await safeTabOperation(chromeAPI.getTabs, { status: "complete" });
       if (tabs) {
         for (const tab of tabs) {
-          if (!tabsInfo.isIgnored(tab.id) && !urlUtils.isBlank(tab.url)) {
+          if (!tabsInfo.isIgnored(tab.id) &&
+              !urlUtils.isBlank(tab.url) &&
+              !settingsManager.isWhitelisted(tab.url)) {
             await duplicateHandler.findAndCloseDuplicates(tab);
           }
         }
@@ -168,16 +284,18 @@ const duplicateHandler = {
 const eventHandlers = {
   onTabCreated: (tab) => {
     tabsInfo.addTab(tab.id, tab.url, tab.windowId);
-    if (tab.status === "complete" && !urlUtils.isBlank(tab.url)) {
+    if (tab.status === "complete" &&
+        !urlUtils.isBlank(tab.url) &&
+        !settingsManager.isWhitelisted(tab.url)) {
       duplicateHandler.findAndCloseDuplicates(tab).catch(console.error);
     }
   },
   onTabUpdated: (tabId, changeInfo, tab) => {
     if (tabsInfo.isIgnored(tabId) || changeInfo.status !== "complete") return;
-    
+
     if (tabsInfo.urlChanged(tabId, tab.url)) {
       tabsInfo.updateTab(tabId, tab.url, tab.windowId);
-      if (!urlUtils.isBlank(tab.url)) {
+      if (!urlUtils.isBlank(tab.url) && !settingsManager.isWhitelisted(tab.url)) {
         duplicateHandler.findAndCloseDuplicates(tab).catch(console.error);
       }
     }
@@ -190,20 +308,25 @@ onTabAttached: (tabId) => {
     const tab = await safeTabOperation(chromeAPI.getTab, tabId);
     if (tab) {
       tabsInfo.updateTab(tab.id, tab.url, tab.windowId);
-      if (!urlUtils.isBlank(tab.url)) {
+      if (!urlUtils.isBlank(tab.url) && !settingsManager.isWhitelisted(tab.url)) {
         await duplicateHandler.findAndCloseDuplicates(tab);
       }
     }
   })();
 },
   onBeforeNavigate: (details) => {
-    if (details.frameId === 0 && details.tabId !== -1 && !urlUtils.isBlank(details.url)) {
+    if (details.frameId === 0 &&
+        details.tabId !== -1 &&
+        !urlUtils.isBlank(details.url) &&
+        !settingsManager.isWhitelisted(details.url)) {
       (async () => {
         const tab = await safeTabOperation(chromeAPI.getTab, details.tabId);
         if (tab && !tabsInfo.isIgnored(tab.id)) {
           if (tabsInfo.urlChanged(tab.id, details.url)) {
             tabsInfo.updateTab(tab.id, details.url, tab.windowId);
-            duplicateHandler.findAndCloseDuplicates({ ...tab, url: details.url }).catch(console.error);
+            if (!settingsManager.isWhitelisted(details.url)) {
+              duplicateHandler.findAndCloseDuplicates({ ...tab, url: details.url }).catch(console.error);
+            }
           }
         }
       })();
@@ -213,7 +336,9 @@ onTabAttached: (tabId) => {
 const initialize = async () => {
   try {
     console.log("Enhanced Auto DeDupe starting...");
-    
+
+    await settingsManager.load();
+
     chrome.tabs.onCreated.addListener(eventHandlers.onTabCreated);
     chrome.tabs.onUpdated.addListener(eventHandlers.onTabUpdated);
     chrome.tabs.onRemoved.addListener(eventHandlers.onTabRemoved);
@@ -230,4 +355,17 @@ const initialize = async () => {
     console.error("Failed to initialize extension:", error);
   }
 };
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!message || typeof message !== "object") return;
+
+  if (message.type === "manualCloseDuplicates") {
+    duplicateHandler.processAllTabs()
+      .then(() => sendResponse({ success: true }))
+      .catch((error) => {
+        console.error("Manual duplicate close failed:", error);
+        sendResponse({ success: false, error: error.message });
+      });
+    return true;
+  }
+});
 initialize();

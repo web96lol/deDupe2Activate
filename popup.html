@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DeDupe2Activate Options</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="container">
+      <section class="card">
+        <header class="card__header">
+          <h1 class="card__title">Options</h1>
+        </header>
+        <div class="card__body">
+          <div class="field">
+            <label class="field__label" for="duplicate-action">On duplicate tab detected</label>
+            <select id="duplicate-action" class="field__input" disabled>
+              <option selected>Close tab automatically</option>
+            </select>
+            <p class="field__hint">Extension automatically removes duplicate tabs in the background.</p>
+          </div>
+
+          <div class="field">
+            <label class="field__label" for="remaining-action">On remaining tab</label>
+            <select id="remaining-action" class="field__input" disabled>
+              <option selected>Activate</option>
+            </select>
+            <p class="field__hint">The extension focuses the remaining original tab.</p>
+          </div>
+
+          <div class="field">
+            <label class="field__label" for="scope">Scope</label>
+            <select id="scope" class="field__input">
+              <option value="global">All windows</option>
+              <option value="window">Current window only</option>
+            </select>
+            <p class="field__hint">Choose whether duplicates are closed across all windows or just within the current one.</p>
+            <div class="field__status" id="scope-status" role="status" aria-live="polite"></div>
+          </div>
+
+          <div class="field">
+            <label class="field__label" for="whitelist">Whitelisted URLs</label>
+            <textarea id="whitelist" class="field__input field__input--textarea" placeholder="Add one URL or domain per line"></textarea>
+            <p class="field__hint">Duplicates that match entries in this whitelist will be ignored.</p>
+            <div class="field__status" id="whitelist-status" role="status" aria-live="polite"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <header class="card__header">
+          <h2 class="card__title">Duplicate tabs</h2>
+        </header>
+        <div class="card__body card__body--flex">
+          <div class="empty-state" id="duplicate-summary">
+            <span class="empty-state__icon" aria-hidden="true">✔</span>
+            <p class="empty-state__message">No duplicate tabs detected.</p>
+          </div>
+          <button id="close-duplicates" class="button button--primary" type="button">Close all duplicates</button>
+          <div class="field__status field__status--inline" id="manual-status" role="status" aria-live="polite"></div>
+        </div>
+      </section>
+    </main>
+    <script src="popup.js" type="module"></script>
+  </body>
+</html>
